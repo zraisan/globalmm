@@ -175,17 +175,3 @@ def build_mmproj(
 
     size_mb = output_path.stat().st_size / (1024 * 1024)
     print(f"Wrote {output_path} ({size_mb:.1f} MB)")
-
-
-if __name__ == "__main__":
-    import sys
-
-    # Quick CLI: load our existing W and build the mmproj
-    W_path = sys.argv[1] if len(sys.argv) > 1 else "data/projector_W_gemma3.pt"
-    out_path = sys.argv[2] if len(sys.argv) > 2 else "data/globalmm-siglip-qwen1.5b-mmproj.gguf"
-
-    print(f"Loading W from {W_path}")
-    W = torch.load(W_path, map_location="cpu").float()
-    print(f"W shape: {tuple(W.shape)}")
-
-    build_mmproj(W, out_path)

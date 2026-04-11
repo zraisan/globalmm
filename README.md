@@ -25,10 +25,16 @@ single matrix multiplication at runtime.
 
 ## Quick start
 
-Install:
+Install with [uv](https://github.com/astral-sh/uv):
 
 ```bash
-pip install globalmm
+uv tool install globalmm
+```
+
+Or run it once without installing:
+
+```bash
+uvx globalmm build --llm ... --concepts ... --out ...
 ```
 
 You need two things to build an mmproj:
@@ -36,14 +42,14 @@ You need two things to build an mmproj:
 1. A target LLM (any Hugging Face causal LM with a standard embedding table).
 2. A list of concept words that describe the visual domain you care about.
    One word per line, plain text. An example covering everyday COCO-style
-   objects lives in `examples/concepts.txt`.
+   objects lives in `data/concepts.txt`.
 
 Then:
 
 ```bash
 globalmm build \
     --llm Qwen/Qwen2.5-1.5B-Instruct \
-    --concepts examples/concepts.txt \
+    --concepts data/concepts.txt \
     --out qwen.gguf
 ```
 
@@ -110,9 +116,10 @@ flowchart TB
 Step by step:
 
 1. Encode each concept word twice. Once through SigLIP's text encoder, which
-   lands in the same contrastive space as SigLIP's image features. Once
-   through the target LLM's embedding table, which lands in the LLM's native
-   token space.
+   puts words and images into the same vector space (SigLIP was trained so
+   that a picture of a cat and the word "cat" end up near each other). Once
+   through the target LLM's embedding table, which gives the LLM's own
+   internal vector for each word.
 2. For each image in the cache, take the SigLIP image vector and compute
    cosine similarity against every concept in SigLIP space. Pick the top three.
 3. Blend the corresponding LLM embeddings with weights proportional to those
@@ -129,19 +136,19 @@ into the prompt wherever the image token sits.
 
 ## Why this works at all
 
-SigLIP is contrastively trained so that semantically similar images and texts
-live near each other in a shared space. The top-k concepts for an image are
-therefore a fuzzy but meaningful label. Blending the LLM embeddings of those
-labels gives a per-image target that sits roughly where the LLM expects to see
-the word describing the image. Fitting `W` against thousands of these pairs
-finds one linear map that generalizes across the concept list. Because the
-fit uses mean-patch features, the same `W` applied to individual patches at
-inference produces 81 soft tokens that each nudge the LLM in the direction of
-the image content.
+SigLIP already knows how to match images to words. It was trained on millions
+of image and caption pairs until similar things landed close together in its
+vector space. That means the top three nearest concepts for any image are
+already a decent guess at what is in the picture. We use those three words
+to describe the image in the LLM's own vocabulary, then solve for one matrix
+that turns SigLIP image vectors into something that looks like those
+descriptions. Because we fit on average image vectors, the same matrix also
+works when applied to individual patches at run time, which gives the LLM
+a small set of soft tokens that point toward the content of the image.
 
-This is a far cry from a trained multimodal model. It is closer to a clever
-lookup table that borrows SigLIP's alignment properties. The upside is that
-building a projector for a new LLM takes seconds instead of GPU-days.
+This is not a proper trained vision model. It is closer to a shortcut that
+reuses the work SigLIP already did. The upside is that building a projector
+for a new LLM takes seconds instead of days on a GPU.
 
 ## Limitations
 
@@ -167,16 +174,45 @@ building a projector for a new LLM takes seconds instead of GPU-days.
 ## API
 
 ```python
-from globalmm import compute_W, build_mmproj
+from globalmm.projector import compute_W
+from globalmm.build_mmproj import build_mmproj
 
 W = compute_W(
     llm_name="Qwen/Qwen2.5-1.5B-Instruct",
-    concepts_path="examples/concepts.txt",
+    concepts_path="data/concepts.txt",
 )
 build_mmproj(W, "qwen.gguf")
 ```
 
 Same result as the CLI, useful for scripting or embedding in a larger pipeline.
+
+## References
+
+The approach borrows from a few papers and projects:
+
+1. Zhai et al., *Sigmoid Loss for Language Image Pre-Training*, ICCV 2023.
+   [arxiv.org/abs/2303.15343](https://arxiv.org/abs/2303.15343). SigLIP is
+   the frozen vision backbone. It was trained so that images and their
+   matching text land in the same vector space, which is what makes the
+   zero-shot concept labeling step work.
+2. Moschella et al., *Relative Representations Enable Zero-Shot Latent Space
+   Communication*, ICLR 2023.
+   [arxiv.org/abs/2209.15430](https://arxiv.org/abs/2209.15430). The broader
+   idea that two frozen embedding spaces can be linked via a fixed set of
+   anchor points without joint training.
+3. Smith et al., *Offline Bilingual Word Vectors, Orthogonal Transformations
+   and the Inverted Softmax*, ICLR 2017.
+   [arxiv.org/abs/1702.03859](https://arxiv.org/abs/1702.03859). Shows that
+   you can link two separate word embedding spaces with a single matrix
+   computed in closed form. The same trick is what globalmm does between
+   SigLIP and the target LLM.
+4. Liu et al., *Visual Instruction Tuning* (LLaVA), NeurIPS 2023.
+   [arxiv.org/abs/2304.08485](https://arxiv.org/abs/2304.08485). The trained
+   linear projector baseline that globalmm replaces with closed-form lstsq.
+5. [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp). The runtime
+   that loads the mmproj and runs SigLIP plus W plus the LLM in a single
+   process. The gemma3 projector type in `clip.cpp` is the specific
+   format globalmm writes into.
 
 ## License
 

@@ -1,10 +1,22 @@
 [project]
 name = "globalmm"
-version = "0.1.0"
+version = "0.1.1"
 description = "Build llama.cpp mmproj.gguf files for any LLM via lstsq, no training."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
+authors = [{ name = "Zain Raisan", email = "zain.kml.raisan@gmail.com" }]
+keywords = ["llama.cpp", "mmproj", "siglip", "multimodal", "vision", "llm"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "torch>=2.3",
     "transformers>=4.45",
@@ -16,7 +28,12 @@ dependencies = [
 ]
 
 [project.scripts]
-globalmm = "globalmm.__main__:main"
+globalmm = "globalmm.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/zraisan/globalmm"
+Source = "https://github.com/zraisan/globalmm"
+Issues = "https://github.com/zraisan/globalmm/issues"
 
 [build-system]
 requires = ["hatchling"]
