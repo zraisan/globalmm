@@ -1,6 +1,13 @@
-# globalmm
+<div align="center">
+  <h1>globalmm</h1>
+  <p><strong>Give any local LLM vision without training</strong></p>
 
-Give any language model vision, without training.
+  <a href="https://pypi.org/project/globalmm/"><img src="https://img.shields.io/pypi/v/globalmm.svg" alt="PyPI"></a>
+  <a href="https://pypi.org/project/globalmm/"><img src="https://img.shields.io/pypi/pyversions/globalmm.svg" alt="Python versions"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/pypi/l/globalmm.svg" alt="License"></a>
+</div>
+
+<br>
 
 `globalmm` builds an `mmproj.gguf` file that plugs into `llama.cpp` and lets any
 local LLM accept images. The projector inside the mmproj is a single 1152xD
@@ -216,4 +223,4 @@ The approach borrows from a few papers and projects:
 
 ## License
 
-MIT. See `LICENSE`.
+[MIT](LICENSE).
