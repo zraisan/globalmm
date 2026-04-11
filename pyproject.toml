@@ -1,0 +1,26 @@
+[project]
+name = "globalmm"
+version = "0.1.0"
+description = "Build llama.cpp mmproj.gguf files for any LLM via lstsq, no training."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+dependencies = [
+    "torch>=2.3",
+    "transformers>=4.45",
+    "safetensors>=0.4",
+    "huggingface-hub>=0.24",
+    "gguf>=0.10",
+    "pillow>=10.0",
+    "numpy>=1.26",
+]
+
+[project.scripts]
+globalmm = "globalmm.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["globalmm"]
