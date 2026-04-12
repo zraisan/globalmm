@@ -1,6 +1,8 @@
 import argparse
 from pathlib import Path
 
+import torch
+
 from globalmm.projector import compute_W
 from globalmm.build_mmproj import build_mmproj
 
@@ -31,7 +33,6 @@ def main() -> None:
 
     out = Path(args.out)
     if args.save_w:
-        import torch
         torch.save(W, out.with_suffix(".W.pt"))
 
     build_mmproj(W, out)

@@ -19,8 +19,6 @@ import gguf
 
 SIGLIP_MODEL = "google/siglip-so400m-patch14-384"
 
-# HF SigLIP name -> llama.cpp v.* name template (with {i} for block index)
-# Shape transform is applied inside _copy_tensor.
 _BLOCK_MAP = {
     "encoder.layers.{i}.layer_norm1.weight":       "v.blk.{i}.ln1.weight",
     "encoder.layers.{i}.layer_norm1.bias":         "v.blk.{i}.ln1.bias",
@@ -71,7 +69,6 @@ def build_mmproj(
     """
     output_path = Path(output_path)
 
-    # ── Load SigLIP ─────────────────────────────────────────────────────────
     print(f"Loading {siglip_name}...")
     model = SiglipModel.from_pretrained(siglip_name)
     processor = SiglipProcessor.from_pretrained(siglip_name)
@@ -88,10 +85,9 @@ def build_mmproj(
     n_positions     = (image_size // patch_size) ** 2  # 729
 
     # Preprocessor stats
-    img_mean = list(processor.image_processor.image_mean)  # [0.5, 0.5, 0.5]
-    img_std  = list(processor.image_processor.image_std)   # [0.5, 0.5, 0.5]
+    img_mean = list(processor.image_processor.image_mean)
+    img_std  = list(processor.image_processor.image_std)
 
-    # LLM embed dim from W shape
     assert W_projector.shape[0] == siglip_embd, \
         f"W has wrong input dim: expected {siglip_embd}, got {W_projector.shape[0]}"
     llm_embd = W_projector.shape[1]
@@ -99,10 +95,8 @@ def build_mmproj(
     print(f"  SigLIP: {siglip_embd}-dim, {siglip_layers} layers, image {image_size}x{image_size}")
     print(f"  Projector: {siglip_embd} -> {llm_embd}, n_merge={n_merge}")
 
-    # ── Create gguf writer ──────────────────────────────────────────────────
     writer = gguf.GGUFWriter(str(output_path), "clip")
 
-    # ── Metadata ────────────────────────────────────────────────────────────
     writer.add_string("general.architecture", "clip")
     writer.add_string("clip.projector_type", "gemma3")
     writer.add_bool("clip.has_text_encoder", False)
@@ -125,49 +119,31 @@ def build_mmproj(
     if n_merge != 4:
         writer.add_uint32("clip.vision.projector.scale_factor", n_merge)
 
-    # ── Vision tensors: patch embedding ─────────────────────────────────────
-    # gguf-py writer REVERSES the numpy shape when storing dims, so we pass
-    # HF's native shapes and end up with the llama.cpp-expected ggml ne[] order.
     state = vision.state_dict()
 
-    # patch_embedding: HF shape (1152, 3, 14, 14), pass as-is -> file dims
-    # [14, 14, 3, 1152] = ggml ne (KW, KH, C_in, C_out) ✓
     pw = state["embeddings.patch_embedding.weight"]
     writer.add_tensor("v.patch_embd.weight", _to_numpy(pw, np.float32))
     writer.add_tensor("v.patch_embd.bias",   _to_numpy(state["embeddings.patch_embedding.bias"], np.float32))
 
-    # position_embedding: HF shape (729, 1152), pass as-is -> file dims
-    # [1152, 729] = ggml ne (n_embd, n_pos) ✓
     pe = state["embeddings.position_embedding.weight"]
     writer.add_tensor("v.position_embd.weight", _to_numpy(pe, np.float32))
 
-    # ── Vision tensors: encoder blocks ──────────────────────────────────────
     for i in range(siglip_layers):
         for hf_tmpl, gg_tmpl in _BLOCK_MAP.items():
             hf_name = hf_tmpl.format(i=i)
             gg_name = gg_tmpl.format(i=i)
             t = state[hf_name]
-            # Most tensors: same shape. No transform.
-            # (Linear .weight is stored as (out, in) in both PyTorch and llama.cpp.)
-            # Norm tensors: 1D, no transform.
             dtype = weight_dtype if t.dim() == 2 else np.float32
             writer.add_tensor(gg_name, _to_numpy(t, dtype))
 
-    # Post layernorm
     writer.add_tensor("v.post_ln.weight", _to_numpy(state["post_layernorm.weight"], np.float32))
     writer.add_tensor("v.post_ln.bias",   _to_numpy(state["post_layernorm.bias"],   np.float32))
 
-    # ── Projector tensors ───────────────────────────────────────────────────
-    # Real gemma3 reader-shape for mm.input_projection.weight is (projection_dim, n_embd).
-    # Writer reverses input numpy shape, so we need to pass numpy (n_embd, projection_dim).
-    # Our W from lstsq already has shape (siglip_embd=1152, llm_embd=projection_dim). Pass as-is.
     writer.add_tensor("mm.input_projection.weight", _to_numpy(W_projector, weight_dtype))
 
-    # soft_emb_norm: all ones (identity element-wise multiply)
     soft_norm = torch.ones(siglip_embd, dtype=torch.float32)
     writer.add_tensor("mm.soft_emb_norm.weight", _to_numpy(soft_norm, np.float32))
 
-    # ── Write ───────────────────────────────────────────────────────────────
     writer.write_header_to_file()
     writer.write_kv_data_to_file()
     writer.write_tensors_to_file()

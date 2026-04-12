@@ -19,10 +19,17 @@ even though it was fit on per-image means — a linear map is shape-agnostic.
 """
 
 import gc
+import json
 from collections import Counter
 from pathlib import Path
+
 import torch
 import torch.nn.functional as F
+from huggingface_hub import hf_hub_download
+from safetensors import safe_open
+from transformers import AutoTokenizer, SiglipTextModel
+
+from .encode import ensure_caches
 
 
 SIGLIP_NAME = "google/siglip-so400m-patch14-384"
@@ -41,7 +48,6 @@ def _load_concepts(path: Path) -> list[str]:
 
 def _encode_concepts_siglip(concepts: list[str]) -> torch.Tensor:
     """Encode concept words with SigLIP's text tower only. Frees SigLIP before returning."""
-    from transformers import SiglipTextModel, AutoTokenizer
     print(f"  loading SigLIP text tower on {DEVICE}...")
     text_model = SiglipTextModel.from_pretrained(SIGLIP_NAME).eval().to(DEVICE)
     tok = AutoTokenizer.from_pretrained(SIGLIP_NAME)
@@ -66,10 +72,6 @@ def _load_embedding_table(llm_name: str) -> torch.Tensor:
     Avoids loading the full LLM into RAM. Tries common tensor names used by
     Qwen/Llama/Mistral-family causal LMs.
     """
-    import json
-    from huggingface_hub import hf_hub_download
-    from safetensors import safe_open
-
     candidates = [
         "model.embed_tokens.weight",   # Qwen2/Llama/Mistral
         "embed_tokens.weight",
@@ -106,7 +108,6 @@ def _lookup_concepts_llm(
     concepts: list[str], llm_name: str
 ) -> tuple[torch.Tensor, list[int], int]:
     """Extract concept embeddings from the target LLM's input embedding table."""
-    from transformers import AutoTokenizer
     print(f"  loading target LLM embedding table: {llm_name}")
     tok = AutoTokenizer.from_pretrained(llm_name)
     emb_table = _load_embedding_table(llm_name)
@@ -120,7 +121,7 @@ def _lookup_concepts_llm(
         if not ids:
             continue
         vecs = emb_table[torch.tensor(ids)]
-        kept_vecs.append(vecs.mean(dim=0))               # mean-pool subwords
+        kept_vecs.append(vecs.mean(dim=0))
         kept_idx.append(i)
     concept_llm = torch.stack(kept_vecs, dim=0)
 
@@ -145,7 +146,6 @@ def compute_W(
     If the cache files are missing this will download an image dataset
     (COCO val2017 by default) and run the SigLIP encoding pass once.
     """
-    from .encode import ensure_caches
     ensure_caches(Path(images_dir), Path(patches_cache), Path(pooled_cache), max_images=max_images)
 
     concepts = _load_concepts(Path(concepts_path))
@@ -159,16 +159,15 @@ def compute_W(
     print(f"  concepts kept after LLM tokenizer: {len(kept_idx)}/{len(concepts)}")
     print(f"  target LLM embedding dim: {d_llm}")
 
-    # Load pooled features (for zero-shot labeling) and patch features (for X).
     pooled = torch.load(pooled_cache, map_location="cpu")
-    img_pooled = pooled["embeddings"].float()            # (N, 1152)
+    img_pooled = pooled["embeddings"].float()
     pooled_stems = pooled["stems"]
     del pooled
     _free()
 
     patches = torch.load(patches_cache, map_location="cpu")
     assert patches["stems"] == pooled_stems, "stem order mismatch between caches"
-    X_mean = patches["features"].float().mean(dim=1)     # (N, 1152) — per-image mean patch
+    X_mean = patches["features"].float().mean(dim=1)
     del patches
     _free()
     N = X_mean.shape[0]
@@ -176,14 +175,14 @@ def compute_W(
 
     # Zero-shot labeling: similarity against concept_siglip
     img_norm = F.normalize(img_pooled, dim=-1)
-    sims = img_norm @ concept_siglip.T                   # (N, N_c)
-    top = sims.topk(k, dim=1)                            # (N, k)
+    sims = img_norm @ concept_siglip.T
+    top = sims.topk(k, dim=1)
     weights = top.values.clamp(min=0)
     weights = weights / weights.sum(dim=1, keepdim=True).clamp(min=1e-8)
 
     # Per-image blended Y
-    picks = concept_llm[top.indices]                     # (N, k, d_llm)
-    Y = (weights.unsqueeze(-1) * picks).sum(dim=1)       # (N, d_llm)
+    picks = concept_llm[top.indices]
+    Y = (weights.unsqueeze(-1) * picks).sum(dim=1)
 
     # Word-balance by primary (top-1) concept
     primary = [kept_concepts[i] for i in top.indices[:, 0].tolist()]
@@ -205,7 +204,7 @@ def compute_W(
     # lstsq on the small balanced set (a few thousand × 1152)
     print(f"  solving lstsq on X={tuple(X_bal.shape)} Y={tuple(Y_bal.shape)}...")
     sol = torch.linalg.lstsq(X_bal, Y_bal)
-    W = sol.solution                                     # (1152, d_llm)
+    W = sol.solution
     resid = (X_bal @ W - Y_bal).pow(2).mean().sqrt().item()
     print(f"  W shape: {tuple(W.shape)}  rmse: {resid:.4f}")
     return W

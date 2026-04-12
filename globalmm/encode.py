@@ -15,6 +15,8 @@ from urllib.request import urlopen
 
 import torch
 import torch.nn.functional as F
+from PIL import Image
+from transformers import SiglipModel, SiglipProcessor
 
 
 SIGLIP_NAME = "google/siglip-so400m-patch14-384"
@@ -99,9 +101,6 @@ def encode_dataset(
     - pooled_cache:  dict{embeddings: (N,1152) fp32, stems: list[str]} — SigLIP's
       attention-pooled image output, used for zero-shot concept labeling.
     """
-    from PIL import Image
-    from transformers import SiglipModel, SiglipProcessor
-
     image_paths = sorted(images_dir.glob("*.jpg")) + sorted(images_dir.glob("*.jpeg")) + sorted(images_dir.glob("*.png"))
     image_paths = image_paths[:max_images]
     if not image_paths:
@@ -136,17 +135,15 @@ def encode_dataset(
                 continue
             pixel_values = processor(images=imgs, return_tensors="pt").pixel_values.to(DEVICE)
 
-            # Attention-pooled output (contrastive-aligned)
             vm_out = vision(pixel_values=pixel_values)
-            pooled = vm_out.pooler_output  # (B, 1152)
+            pooled = vm_out.pooler_output
             pooled_out.append(pooled.float().cpu())
 
-            # Raw patch tokens -> avg_pool(3) -> rms_norm
-            patches = vm_out.last_hidden_state  # (B, 729, 1152)
+            patches = vm_out.last_hidden_state
             B, _, D = patches.shape
-            p = patches.reshape(B, grid, grid, D).permute(0, 3, 1, 2)     # (B,D,27,27)
-            p = F.avg_pool2d(p, kernel_size=n_merge, stride=n_merge)       # (B,D,9,9)
-            p = p.permute(0, 2, 3, 1).reshape(B, -1, D)                    # (B,81,1152)
+            p = patches.reshape(B, grid, grid, D).permute(0, 3, 1, 2)
+            p = F.avg_pool2d(p, kernel_size=n_merge, stride=n_merge)
+            p = p.permute(0, 2, 3, 1).reshape(B, -1, D)
             p = rms_norm(p)
             patches_out.append(p.half().cpu())
 
