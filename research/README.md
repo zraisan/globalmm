@@ -443,7 +443,9 @@ Planned next steps:
 ## 10. Reproducing
 
 The scripts are copied into [`code/`](code/). They expect the workspace layout of `.globalmm/`:
-`scripts/`, `dl/` for models, `coco/`, `audio/` and `analysis/`.
+`scripts/`, `dl/` for models, `coco/`, `audio/` and `analysis/`. Python dependencies are torch
+(CUDA), transformers, safetensors, gguf, numpy, pillow, requests, ijson, pyarrow, soundfile, scipy,
+jiwer and matplotlib.
 
 All scripts are in `.globalmm/scripts/`. Heavy jobs run inside memory-capped `systemd-run` scopes
 with a RAM/temperature watchdog. That is how 3+ hour runs completed on an 8 GB laptop GPU while
