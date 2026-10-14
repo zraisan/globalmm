@@ -180,9 +180,24 @@ for a new LLM takes seconds instead of days on a GPU.
 
 ## Research: trained connectors for grounding and audio
 
-[`research/`](research/README.md) holds experiments that go beyond the closed-form matrix. They
-replace it with a small *trained* connector, keeping both the encoder and the LLM frozen, and the
-result is still a drop-in llama.cpp mmproj:
+[`research/`](research/README.md) holds experiments that go beyond the closed-form matrix. They are
+separate from the `globalmm` package above, which is unchanged. The idea is the same (a frozen
+encoder, then something in the middle, then a frozen LLM), but the middle piece is *trained* instead of
+fit in one step. That costs GPU hours, and in return the LLM learns *where* things are, not just
+*what* they are:
+
+| | `globalmm` package (above) | Research: trained connector | Research: layer transplant |
+|---|---|---|---|
+| Frozen encoder | SigLIP SO400M | Qwen3.8 vision tower (or Whisper for audio) | Qwen3-VL-2B vision tower + its first 4 LLM layers |
+| Middle piece | one matrix `W` (1152 × d) | small trained network (30.7M params) | small trained network (16.8M params) |
+| How it is made | least squares on CPU, seconds | trained through the frozen LLM, 3–3.5 GPU-hours | same, 3.5 GPU-hours |
+| Learns from | concept words blended per image | target answers: boxes, captions, transcripts | same |
+| Tokens sent to the LLM | 81 soft tokens pointing at *what* is in the image | one per 32×32-pixel patch, keeping layout | same |
+| Bounding boxes (held-out COCO, Acc@0.5) | no | 74% | 86% |
+| Runs in llama.cpp | yes | yes, as an mmproj | not yet (PyTorch only) |
+| New LLM | rebuild in seconds | retrain the connector | retrain the connector |
+
+Results so far, all with an unmodified Llama-3.2-1B:
 
 - **Image grounding.** Qwen3.8's vision tower plus a 30.7M-parameter connector gives the text-only
   Llama-3.2-1B bounding boxes. "Where is the X?" Acc@0.5 is 74% on held-out COCO, against 5% for a
