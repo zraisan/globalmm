@@ -178,6 +178,26 @@ for a new LLM takes seconds instead of days on a GPU.
    projector can recover it. This is not a replacement for proper multimodal
    training if you need state-of-the-art quality.
 
+## Research: trained connectors for grounding and audio
+
+[`research/`](research/README.md) holds experiments that go beyond the closed-form matrix. They
+replace it with a small *trained* connector, keeping both the encoder and the LLM frozen, and the
+result is still a drop-in llama.cpp mmproj:
+
+- **Image grounding.** Qwen3.8's vision tower plus a 30.7M-parameter connector gives the text-only
+  Llama-3.2-1B bounding boxes. "Where is the X?" Acc@0.5 is 74% on held-out COCO, against 5% for a
+  no-image prior.
+- **Layer transplant.** Copying Qwen3-VL-2B's vision tower *and its first 4 LLM layers* (frozen) and
+  training only a 16.8M-parameter connector after them raises that to 86% on identical training
+  (Qwen3-VL-2B itself: 91%). This one runs in PyTorch only for now.
+- **Audio.** The Whisper-large-v3-turbo encoder plus a 46M-parameter connector gives the same Llama
+  speech transcription at 5.3% WER and sound-event timestamps.
+- **Analysis.** Why closed-form mappings fail on image tokens, where trained tokens end up in
+  Llama's latent space, a training-free test of transplanting a VLM's layers, and a hybrid of the two.
+
+Each connector took about 3 to 3.5 GPU-hours on one 8 GB laptop GPU. These experiments are not part of the
+`globalmm` package yet.
+
 ## API
 
 ```python
