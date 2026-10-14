@@ -22,6 +22,13 @@ the unmodified Llama GGUF and the model can see (or hear).
 | Training | 3.2 h on one laptop RTX 3070 (8 GB) | 3.3 h of GPU time on the same GPU |
 
 <p align="center"><img src="figures/000000000785_boxes.jpg" width="49%"> <img src="figures/000000000724_boxes.jpg" width="49%"></p>
+**Newest result: transplanting a VLM's first layers.** Instead of feeding Llama a bare vision tower,
+we copy Qwen3-VL-2B's vision tower *plus its first 4 language-model layers* (frozen) and train only a
+16.8M-parameter connector after them. On identical data and schedule this raises held-out COCO
+"where is X?" Acc@0.5 from **74.0% to 85.9%** (Qwen3-VL-2B itself: 91.1%) and non-COCO LVIS objects
+from 21.5% to 28.0% ([Section 8](#8-trained-transplant-copy-a-vlms-first-layers-then-train-a-connector)).
+It runs in PyTorch only for now; llama.cpp cannot yet run decoder layers inside an mmproj.
+
 <p align="center"><sub>Output of llama.cpp running the unmodified Llama-3.2-1B GGUF with our mmproj. In each image, the left panel answers "List the objects in this image with their bounding boxes." and the right panel answers "Where is the &lt;object&gt;?". <b>Red</b> boxes are the model's answers; <b>green</b> boxes are COCO ground truth. Images are from the held-out set.</sub></p>
 
 ---
@@ -35,9 +42,10 @@ the unmodified Llama GGUF and the model can see (or hear).
 5. [Audio](#5-audio)
 6. [Inside the latent space after training](#6-inside-the-latent-space-after-training)
 7. [Transplanting a VLM's layers instead of training](#7-transplanting-a-vlms-layers-instead-of-training)
-8. [Training budget](#8-training-budget)
-9. [Limitations](#9-limitations)
-10. [Reproducing](#10-reproducing)
+8. [Trained transplant: copy a VLM's first layers, then train a connector](#8-trained-transplant-copy-a-vlms-first-layers-then-train-a-connector)
+9. [Training budget](#9-training-budget)
+10. [Limitations](#10-limitations)
+11. [Reproducing](#11-reproducing)
 
 ---
 
@@ -399,11 +407,195 @@ Two limits remain:
 - The decode step uses a 152k-way output head with top-k selection, which llama.cpp's mmproj graph
   cannot express today.
 
-The next experiment is a **hybrid**: feed Llama both the decoded-word tokens from 1–2 donor layers
-(open-vocabulary *what*) and the trained connector's tokens (*where*), and retrain the connector with
-both present.
+### 7.1 Hybrid: decoded words alongside the trained connector
 
-## 8. Training budget
+Can the decoded words add open vocabulary to the trained grounding connector? In the **hybrid**, each
+image patch reaches Llama as two inputs, interleaved in raster order:
+
+1. the trained connector's token;
+2. the patch's decoded-word embedding from the donor's first layer (k = 1).
+
+The two encoders share a 32-pixel token grid, and the alignment checks out: 1.9% of object patches
+decode to the object's name, against 0.7–0.8% for transposed or shuffled orders. Starting from the
+full connector, we trained 3,000 more steps on 32k train2017 images (`prep_hybrid.py`,
+`train_hybrid.py`). A **control** ran the identical schedule without the word tokens. All three
+connectors were evaluated with the same code (`eval_hybrid.py`).
+
+| Connector | COCO Acc@0.5 | COCO IoU | Non-COCO (LVIS) Acc@0.5 | LVIS IoU |
+|---|---|---|---|---|
+| Full connector (reference) | 73.4% | 0.64 | 20.3% | 0.21 |
+| Control: +3,000 steps, no words | 75.0% | 0.65 | 19.9% | 0.22 |
+| **Hybrid: +3,000 steps, with decoded words** | 72.9% | 0.63 | 17.1% | 0.20 |
+
+**The hybrid does not help.** It ignores the words even where they should matter most. On the 84
+non-COCO questions whose query word appears among the image's decoded words, the hybrid scores 17.9%
+and the control 20.2%. The likely reason is the training signal:
+
+- every training question asks about a COCO category, which the connector's own tokens already
+  carry, so nothing rewards reading the word tokens;
+- the per-patch word signal after one donor layer is weak.
+
+Making this work would need training questions that only the words can answer, such as LVIS
+categories on train2017. That points back to the data hypothesis of Section 4.4, not to more
+architecture.
+
+The decoded words did not help, but the donor's layers can still help when the connector reads their
+hidden states directly instead of words. Section 8 does that and gets the best grounding in this work.
+
+## 8. Trained transplant: copy a VLM's first layers, then train a connector
+
+Section 7 kept everything training-free and lost the boxes. The **trained transplant** combines the two
+ideas: copy a real VLM's vision tower *and its first k LLM layers* unchanged, then train a connector
+from that point into the frozen target LLM, exactly as in Section 3. The copied layers were trained
+to read image tokens. The question is whether a few of them do useful work that a connector trained
+on top of a bare vision tower does not get.
+
+### 8.1 Method
+
+```mermaid
+flowchart LR
+    img[image<br/>longest side 448] --> vt["Qwen3-VL-2B vision tower<br/>+ DeepStack<br/>(copied, frozen, 407M)"]
+    vt --> lay["Qwen3-VL-2B LLM layers 1…k<br/>(copied, frozen, 50.3M each)"]
+    lay --> rms["RMS-normalise<br/>image-token hidden states<br/>n × 2048"]
+    rms --> conn["connector<br/>LayerNorm · Linear 2048→4096 · GELU · Linear 4096→2048<br/><b>trained, 16.8M</b>"]
+    conn --> llm["Llama-3.2-1B-Instruct<br/>(frozen, unmodified)"]
+    llm --> out["dog [312,402,655,890]"]
+    drop["layers k+1…28 + output head<br/>(discarded)"] -.- lay
+```
+
+- **The donor.** Qwen3-VL-2B (2.13B parameters) runs on the image with its own chat template and a
+  fixed "Describe." prompt. A hook stops the forward pass after layer *k* and keeps the hidden states at
+  the image-token positions. Every layer after *k* and the output head are deleted, so the donor costs
+  only the tower plus *k* layers: 407M + 4 × 50.3M = 608M parameters at *k* = 4.
+- **One token per 32 × 32-pixel patch**, in raster order, the same grid as the Qwen3.8 connector, so
+  boxes stay possible.
+- **Hidden-state sizes vary a lot across layers**, so each token is RMS-normalised before the
+  connector. The connector's last layer is scaled at the start so its outputs begin at the size of
+  Llama's word embeddings.
+- **Training** is the same as Section 3: only the connector learns, the loss is next-token
+  cross-entropy on the answer, and the tasks are the same three (lists with boxes 45%, "where is X?"
+  35%, one-sentence captions 20%).
+- **Evaluation** uses the same 192 held-out COCO images and 246 non-COCO LVIS questions as Section 4,
+  with the same scoring code.
+
+**First layers, not last.** Section 7 found that the *last* donor layers are best when image tokens are
+turned into words, because the deep layers are the ones that know object names. The trained
+transplant needs something different. Boxes need *where*, and early layers still keep each patch
+mostly about its own spot in the image. Late layers spread information across patches and turn it
+into next-word predictions, which blurs position. The connector also learns to read raw hidden states,
+so the late layers' naming advantage matters less. We therefore copy the **first** *k* layers.
+
+### 8.2 Choosing k: a short sweep
+
+*k* is not learned. We picked it by training one connector per *k* on a short budget (32k train2017
+images, 3,000 steps × 8, lr 3e-4) and comparing them. A **matched baseline** trained the Section 3
+connector design on the Qwen3.8 tower with the identical budget.
+
+<p align="center"><img src="figures/transplant_sweep.png" width="90%"></p>
+
+| Vision side (all 3,000 steps, 32k images) | COCO Acc@0.5 | COCO IoU | COCO box P / R | LVIS Acc@0.5 | LVIS IoU |
+|---|---|---|---|---|---|
+| Qwen3.8 tower (matched baseline) | 50.0% | 0.49 | 0.22 / 0.26 | 14.2% | 0.19 |
+| Qwen3-VL-2B tower, k = 0 | 45.3% | 0.46 | 0.22 / 0.24 | 12.6% | 0.18 |
+| **Qwen3-VL-2B tower + 4 layers** | **64.1%** | **0.57** | **0.31 / 0.35** | **18.3%** | **0.23** |
+| Qwen3-VL-2B tower + 12 layers | 54.2% | 0.53 | 0.27 / 0.31 | 12.6% | 0.17 |
+
+<sub>k = 12 ran out of 8 GB at micro-batch 4, so it used micro-batch 2 with 4 accumulation steps (the same batch of 8).</sub>
+
+- **The tower alone is not better.** At k = 0 Qwen3-VL-2B's tower is slightly *worse* than Qwen3.8's.
+  The gain comes from the copied layers, not from switching vision towers.
+- **Four layers help a lot; twelve help less.** That matches the *where* argument above. Only three
+  values of *k* were tried, so the true best may be 2, 6 or 8.
+- **A confound.** Qwen3-VL injects extra vision-tower features ("DeepStack") into LLM layers 0–2. At
+  k = 0 those injections never happen; at k ≥ 3 all of them do. Part of the k = 4 gain may therefore
+  come from those multi-level vision features rather than from the layers' own processing. Separating
+  the two would need a k = 3 run, or a k = 0 run that adds the DeepStack features by hand.
+
+### 8.3 Equal footing: the full comparison
+
+The short runs pick *k*, but they are under-trained. For the real comparison both designs trained
+**from scratch on identical data and schedule**: all 118,287 train2017 images (one epoch), 14,800 steps
+× 8 (micro-batch 2 × 4 accumulation), lr 3e-4 with 100 warm-up steps and cosine decay, then the same
+held-out evaluation.
+
+<p align="center"><img src="figures/equal_footing.png" width="95%"></p>
+
+| | **Transplant k = 4** | Qwen3.8 connector | run_full (Section 4, reference) | Qwen3-VL-2B (end-to-end VLM) |
+|---|---|---|---|---|
+| Trained parameters | **16.8M** | 30.7M | 30.7M | all 2.13B |
+| COCO "where" Acc@0.5 | **85.9%** | 74.0% | 73.4% | 91.1% |
+| COCO "where" IoU | **0.75** | 0.63 | 0.64 | 0.83 |
+| Acc@0.5 small / medium / large (n = 9 / 85 / 98) | **67% / 79% / 94%** | 33% / 61% / 89% | 22% / 62% / 89% | 78% / 88% / 95% |
+| COCO list, class P / R | **0.93 / 0.86** | 0.91 / 0.83 | 0.90 / 0.83 | – |
+| COCO list, box P / R @0.5 | **0.58 / 0.59** | 0.42 / 0.44 | 0.45 / 0.48 | – |
+| COCO list, duplicate lines | **12.6%** | 20.3% | 19.6% | – |
+| LVIS (non-COCO) Acc@0.5 | **28.0%** | 21.5% | 20.3% | 84.6% |
+| LVIS medium / large | **17.5% / 55.1%** | 10.7% / 49.3% | 11.9% / 42.0% | 80.2% / 95.7% |
+| Final training loss | **1.89** | 2.09 | 2.06 | – |
+
+<sub>run_full numbers here come from the same evaluation code (`eval_hybrid.py`) as the Qwen3.8 connector. Section 4 reports 74.0% from `eval_extra.py`; the difference is bf16 non-determinism. Qwen3-VL-2B by-size numbers are from Section 4.3.</sub>
+
+- **The control reproduces.** The Qwen3.8 connector trained from scratch lands at 74.0% / 21.5%, on top
+  of run_full's 73.4% / 20.3%. The gap below is therefore not training noise in the baseline.
+- **The transplant wins on every metric, with about half the trained parameters.** On COCO it closes
+  most of the gap to the end-to-end VLM (85.9% vs 91.1%). It is also the first of our models to do
+  reasonably on small objects (6 of 9) and it repeats itself less in lists.
+- **The difference is statistically clear.** On the same questions, the transplant is right where the
+  Qwen3.8 connector is wrong 31 times, and the reverse happens 8 times (exact McNemar p = 0.0003). On
+  LVIS it is 29 vs 13 (p = 0.02).
+- **Objects outside COCO stay hard.** LVIS rises from 21.5% to 28.0%, still far below Qwen3-VL-2B's
+  84.6%. The copied layers bring some open-vocabulary knowledge, but training only on COCO's 80
+  categories still limits generalisation (Section 4.4).
+- **More training mattered as much as the design.** The same k = 4 transplant went from 64.1% after
+  3,000 steps on 32k images to 85.9% after one epoch on 118k images.
+
+<p align="center"><img src="figures/transplant_examples.jpg" width="95%"></p>
+<p align="center"><sub>"Where is the X?" on held-out COCO images where the two equal-footing runs disagree. Top row and bottom left: evenly spaced picks from the 31 questions only the transplant gets right. Bottom middle and right: evenly spaced picks from the 8 only the Qwen3.8 connector gets right. <b>Green</b>: ground truth. <b>Blue</b>: transplant k = 4. <b>Orange</b>: Qwen3.8 connector.</sub></p>
+
+### 8.4 Beyond boxes: does it still describe?
+
+20% of training examples are one-sentence captions, so the transplant can also describe images. On
+six held-out images, asked "Describe this image in one sentence.":
+
+| COCO reference caption | Transplant k = 4 + Llama-3.2-1B |
+|---|---|
+| A couple of cats laying on top of a pink blanket. | Two cats are laying on a couch together. |
+| A woman stands in the dining area at the table. | A woman is standing in a living room with a television. |
+| A woman posing for the camera standing on skis. | A woman skiing down a snowy hill. |
+| Bedroom scene with a bookcase, blue comforter and window. | A bedroom with a bed, a desk, and a bookshelf. |
+| The people are posing for a group photo. | A group of young people standing in front of a tennis court. |
+| A stop sign is mounted upside-down on it's post. | A stop sign on a street with a truck parked next to it. |
+
+Outside the three trained prompts the limits of Section 10 apply:
+
+- "What is happening in this picture? Give some detail." sometimes gets a good sentence and sometimes
+  a loop ("A woman is standing in front of a table." repeated), because every training caption is a
+  single sentence.
+- "What colors are the main objects?" gets an object list with boxes instead of colours.
+
+The fix is data, not architecture: detailed descriptions and question answering (for example LLaVA
+instruction data and VQAv2 on COCO images) mixed into training.
+
+### 8.5 Does it work with any LLM, and in llama.cpp?
+
+- **Each connector belongs to one (donor, k, LLM) combination.** The connector learns to write
+  vectors that one particular frozen LLM understands. A different LLM, even one with the same hidden
+  size, needs its own connector. Quantised versions of the same Llama should work unchanged; we have
+  not tested that.
+- **Moving to a new LLM means retraining only the connector.** The donor and *k* stay the same,
+  because where the useful information sits is a property of the donor, not of the receiving LLM (an
+  expectation, not yet tested). For a 1B-class LLM that is one 3.5-hour run on this GPU.
+- **A new donor VLM needs a new *k*.** Layer counts and processing speed differ between models. "About
+  the first 15% of layers" (4 of 28) is a starting guess from one donor, not a rule. A cheaper way to
+  choose *k* would be to probe every donor layer for *where* (linear read-out of patch position and
+  boxes) and *what* (linear read-out of the patch's object class), then confirm the best two or three
+  candidates with short training runs. That scan is not built yet.
+- **Not in llama.cpp yet.** An mmproj today holds a vision tower and a projector. The transplant would
+  also need the donor's decoder layers, with Qwen3-VL's 3D rotary positions and DeepStack injection,
+  to run inside the mmproj graph. Until then it runs in PyTorch, and the deployable mmproj remains the
+  Section 3 connector.
+
+## 9. Training budget
 
 All runs used one RTX 3070 Laptop GPU (8 GB) and a 13.8 GB-RAM machine that stayed in normal use.
 
@@ -412,19 +604,29 @@ All runs used one RTX 3070 Laptop GPU (8 GB) and a 13.8 GB-RAM machine that stay
 | Vision, run1 | 4.5k COCO images (features cached once) | 2,500 × 8 | 24 min | 24 min | 5.3 GB | 30.7M / 1.65B |
 | Vision, full | 118k COCO images (encoder run live) | 14,800 × 8 | 3 h 15 min | 3 h 15 min | 6.1 GB | 30.7M / 1.65B |
 | Audio | 100 h LibriSpeech + 1.6k ESC-50 clips | 8,000 × 8 | ≈3 h 15 min | 6 h 46 min | 6.2 GB | 46.1M / 1.87B |
+| Transplant sweep, k = 0 / 4 / 12 | 32k COCO images | 3 × 3,000 × 8 | 40 / 42 / 50 min | – | 6.3–6.7 GB | 16.8M / 1.65–2.25B |
+| Matched baseline (Qwen3.8) | 32k COCO images | 3,000 × 8 | 42 min | – | 6.0 GB | 30.7M / 1.65B |
+| **Equal footing, transplant k = 4** | 118k COCO images | 14,800 × 8 | 3 h 32 min | 3 h 55 min | 5.7 GB | 16.8M / 1.85B |
+| **Equal footing, Qwen3.8 connector** | 118k COCO images | 14,800 × 8 | 3 h 30 min | 3 h 30 min | 4.9 GB | 30.7M / 1.65B |
 
-That is about 7 GPU-hours of training plus about 1.5 hours of evaluation. The audio run's wall
-clock is longer because the RAM watchdog paused it whenever free memory fell below 750 MB. The
-connectors make up 1.8% (vision) and 2.4% (audio) of each pipeline's parameters.
+That is about 17 GPU-hours of training for the runs listed, plus a few hours of evaluation (each
+grounding evaluation takes about 4 minutes). Wall clock is longer than GPU time when the RAM watchdog
+stopped a run because free memory fell below 750 MB; the run then resumed from its last checkpoint
+(the equal-footing transplant was restarted 7 times this way). The connectors make up 1.8% (vision),
+2.4% (audio) and 0.9% (transplant) of each pipeline's parameters.
 
-## 9. Limitations
+## 10. Limitations
 
 - **Closed vocabulary.** Grounding was trained only on COCO's 80 categories with three prompt
-  templates. Outside them, Acc@0.5 falls from 74% to 21% (Section 4.4). The model also over-learned
+  templates. Outside them, Acc@0.5 falls from 74% to 21% (Section 4.4), and from 86% to 28% for the
+  transplant (Section 8). The model also over-learned
   the answer format: "What colour is her jacket?" gets a bounding box instead of "red". Audio has the
   same limit: 50 ESC-50 sound classes.
 - **Repetition in long lists.** Greedy decoding loops on scenes with many similar objects.
-- **Small objects.** Acc@0.5 is 22% for objects under 1% of the image.
+- **Small objects.** Acc@0.5 is 22% for objects under 1% of the image (67% for the transplant, but on only 9 questions).
+- **The best model is not deployable yet.** The transplant needs decoder layers inside the mmproj,
+  which llama.cpp does not support. Its *k* was chosen from three values by hand, and the DeepStack
+  confound (Section 8.2) is not resolved.
 - **Binding in audio.** With several sounds in a clip, "when is X" often returns another event's span.
 - **Synthetic audio scenes.** Timestamp tasks use artificial mixtures of non-overlapping clips. Real
   recordings with overlapping sounds would be harder.
@@ -438,9 +640,11 @@ Planned next steps:
 - mix in VQAv2 so ordinary questions get ordinary answers;
 - deduplicate list targets to stop repetition;
 - for audio, train on real recordings with overlapping sounds (AudioSet / AudioCaps) and on many-event clips, to fix label-to-segment binding;
-- train a connector for a second LLM family to support the "any model" claim.
+- train a connector for a second LLM family to support the "any model" claim;
+- run the transplant's copied layers inside a llama.cpp mmproj so the best grounding model ships as a file;
+- build the per-layer *where*/*what* probe scan to choose *k* for other donor VLMs, and run k = 2, 3, 6, 8 on Qwen3-VL-2B.
 
-## 10. Reproducing
+## 11. Reproducing
 
 The scripts are copied into [`code/`](code/). They expect the workspace layout of `.globalmm/`:
 `scripts/`, `dl/` for models, `coco/`, `audio/` and `analysis/`. Python dependencies are torch
@@ -470,6 +674,47 @@ python export_audio_mmproj.py ../analysis/audio/a1/connector.pt ../dl/mmproj-whi
 python make_figures.py
 python latent_blog.py                                                        # latent-space measurements
 python bridge_test.py qwen && python bridge_test.py llama                    # layer-transplant test
+python prep_hybrid.py eval && python prep_hybrid.py train 32000              # decoded-word cache (donor layer 1)
+bash hybrid_chain.sh                                                          # hybrid + control training, evaluation
+
+# trained transplant (donor: Qwen/Qwen3-VL-2B-Instruct in ../dl/qwen3vl-2b)
+python train_transplant.py train --k 4 --steps 3000                          # one sweep point (32k images)
+python train_transplant.py eval  --k 4                                       # -> analysis/grounding/transplant_k4/eval.json
+bash transplant_chain.sh                                                      # sweep k = 0, 4, 12: train + evaluate each
+bash matched_chain.sh                                                         # Qwen3.8 connector, same 3k-step budget
+bash equal_chain.sh                                                           # equal footing: both designs, 118k images, 14,800 steps
+python make_transplant_figures.py                                            # Section 8 figures, size breakdown, McNemar test
+```
+
+The chain scripts wait until more than 3 GB of RAM is free, run each job in a memory-capped
+`systemd-run` scope, and relaunch it after a watchdog stop; training resumes from `ckpt.pt`. A job is
+finished when its log contains a line `DONE`.
+
+The equal-footing chain runs these two commands (plus their evaluations):
+
+```bash
+python train_transplant.py train --k 4 --data full --steps 14800 --bs 2 --accum 4 --lr 3e-4 --tag eq_transplant_k4
+python train_hybrid.py --no-words --init qwen --data full --steps 14800 --bs 2 --accum 4 --lr 3e-4 --tag eq_qwen38
+```
+
+**Using the transplant from Python** (run from `scripts/`; there is no llama.cpp path yet):
+
+```python
+import torch
+from PIL import Image
+import train_connector as T, train_transplant as P
+
+donor = P.Donor(4)                                   # Qwen3-VL-2B tower + first 4 LLM layers, frozen
+tok, llm = T.load_llm("cuda")                        # Llama-3.2-1B-Instruct, frozen
+conn = P.TConn().cuda()
+conn.load_state_dict(torch.load(T.DATA / "eq_transplant_k4/connector.pt"))
+B = T.Batcher(tok, None, None, None)
+
+x = donor(P.fit32(Image.open("photo.jpg").convert("RGB")))   # longest side 448, sides multiples of 32
+pre, post = B.prompt_parts("Where is the dog? Answer with bounding boxes.")
+emb, att, _ = T.embed_batch(llm, conn, [(pre, x, post, [])], "cuda")
+out = llm.generate(inputs_embeds=emb, attention_mask=att, max_new_tokens=60, do_sample=False)
+print(tok.decode(out[0], skip_special_tokens=True))          # e.g. [312,402,655,890] on a 0-999 scale
 ```
 
 **Using it.** You need a current llama.cpp. An older build (9940) gave visibly degraded vision output.
