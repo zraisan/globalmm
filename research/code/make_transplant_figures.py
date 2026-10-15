@@ -1,7 +1,7 @@
-"""Figures and numbers for the trained-transplant section of research/README.md (Section 8).
+"""Figures and numbers for the connector + donor section of research/README.md (Section 8).
 
   transplant_sweep.png     COCO / LVIS Acc@0.5 vs donor layers k (3k-step runs) with the matched baseline
-  equal_footing.png        full-data runs: loss curves + held-out scores, transplant k=4 vs Qwen3.8 connector
+  equal_footing.png        full-data runs: loss curves + held-out scores, connector + donor (k=4) vs connector (Qwen3.8)
   transplant_examples.jpg  "where is X?" answers of both full-data runs on evenly spaced held-out images
 Also prints Acc@0.5 by object size and a paired (McNemar) comparison of the two full-data runs.
 """
@@ -48,11 +48,11 @@ fig, ax = plt.subplots(1, 2, figsize=(9, 3.2))
 for a, part, title in ((ax[0], "coco", "COCO (80 trained categories)"), (ax[1], "lvis", "LVIS (non-COCO objects)")):
     ks = sorted(sweep)
     vals = [100 * sweep[k][part]["where_acc50"] for k in ks]
-    a.plot(ks, vals, color=C1, lw=2, marker="o", ms=8, label="transplant (Qwen3-VL-2B tower + k layers)")
+    a.plot(ks, vals, color=C1, lw=2, marker="o", ms=8, label="connector + donor (Qwen3-VL-2B tower + k layers)")
     m = 100 * matched[part]["where_acc50"]
     for k, v in zip(ks, vals):  # value labels above the marker, or below it when under the baseline line
         a.text(k, v + 2 if v > m else v - 2, f"{v:.1f}", ha="center", va="bottom" if v > m else "top", fontsize=9, color=INK)
-    a.axhline(m, color=C2, lw=2, ls="--", label="Qwen3.8 connector, same budget")
+    a.axhline(m, color=C2, lw=2, ls="--", label="connector (Qwen3.8 tower), same budget")
     a.text(8, m - 0.8, f"{m:.1f}", ha="center", va="top", fontsize=9, color=INK)
     a.set(title=title, xlabel="donor LLM layers copied (k)", ylabel='"where" Acc@0.5 (%)', xticks=[0, 4, 12],
           ylim=(0, max(vals) + 15), xlim=(-1, 14))
@@ -63,7 +63,7 @@ print("transplant_sweep.png")
 
 # ---------------------------------------------------------------- equal footing
 fig, ax = plt.subplots(1, 2, figsize=(10, 3.4), gridspec_kw={"width_ratios": [1, 1.15]})
-for log, c, name in (("train_transplant.log", C1, "transplant k=4"), ("train_baseline.log", C2, "Qwen3.8 connector")):
+for log, c, name in (("train_transplant.log", C1, "connector + donor (k=4)"), ("train_baseline.log", C2, "connector (Qwen3.8)")):
     xs, ys = curve(ROOT / "analysis/equal" / log)
     ax[0].plot([x * 8 / 1000 for x in xs], ys, color=c, lw=2, label=name)
 ax[0].set(title="Training loss (same data and schedule)", xlabel="training examples (thousands)", ylabel="answer-token loss")
@@ -71,7 +71,7 @@ ax[0].legend(frameon=False)
 metrics = [("COCO\nAcc@0.5", "coco", "where_acc50"), ("COCO list\nbox recall", "coco", "box_r"),
            ("LVIS\nAcc@0.5", "lvis", "where_acc50"), ("LVIS large\nAcc@0.5", "lvis", "where_acc50_large")]
 w = 0.38
-for j, (e, c, name) in enumerate(((eq_t, C1, "transplant k=4"), (eq_b, C2, "Qwen3.8 connector"))):
+for j, (e, c, name) in enumerate(((eq_t, C1, "connector + donor (k=4)"), (eq_b, C2, "connector (Qwen3.8)"))):
     vals = [100 * e[p][k] for _, p, k in metrics]
     bars = ax[1].bar([i + (j - 0.5) * w for i in range(len(metrics))], vals, w - 0.04, color=c, label=name)
     for b, v in zip(bars, vals):
@@ -128,7 +128,7 @@ for r in rows:
         if pb:
             d.rectangle(sc([int(v) for v in pb[0]]), outline=col, width=wd)
     d.rectangle((0, 0, W, 18), fill=(255, 255, 255))
-    d.text((4, 3), f'"{r["name"]}"   transplant IoU {r["where_iou"]:.2f} | Qwen3.8 {bt[r["stem"]]["where_iou"]:.2f}',
+    d.text((4, 3), f'"{r["name"]}"   connector + donor IoU {r["where_iou"]:.2f} | connector {bt[r["stem"]]["where_iou"]:.2f}',
            fill=(20, 20, 20))
     tiles.append(im)
 cw, ch = 420, max(t.size[1] for t in tiles)

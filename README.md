@@ -11,8 +11,8 @@
 
 `globalmm` builds an `mmproj.gguf` file that plugs into `llama.cpp` and lets any
 local LLM accept images. The projector inside the mmproj is a single 1152xD
-matrix, fit in seconds via closed-form least squares. No gradient descent, no
-hours of GPU time, no paired image-caption dataset.
+matrix, fit in seconds with closed-form least squares. Building it needs no
+gradient descent, no GPU time and no paired image-caption dataset.
 
 ## What you get
 
@@ -26,9 +26,9 @@ flowchart LR
     llm --> text[text response]
 ```
 
-Everything to the left of `W` is frozen SigLIP. Everything to the right of `W`
-is your frozen LLM. `W` is the only thing `globalmm` computes, and it is a
-single matrix multiplication at runtime.
+SigLIP (left of `W`) and your LLM (right of `W`) both stay frozen. `W` is the
+only part `globalmm` computes, and at runtime it costs one matrix
+multiplication.
 
 ## Quick start
 
@@ -86,7 +86,7 @@ Or through the OpenAI-compatible server:
 llama-server -m qwen2.5-1.5b.gguf --mmproj qwen.gguf --port 8080
 ```
 
-No Python at inference time. No transformers. No GPU required.
+Inference runs entirely in llama.cpp and needs neither Python, transformers nor a GPU.
 
 ## How it works
 
@@ -153,19 +153,18 @@ descriptions. Because we fit on average image vectors, the same matrix also
 works when applied to individual patches at run time, which gives the LLM
 a small set of soft tokens that point toward the content of the image.
 
-This is not a proper trained vision model. It is closer to a shortcut that
-reuses the work SigLIP already did. The upside is that building a projector
-for a new LLM takes seconds instead of days on a GPU.
+This reuses the work SigLIP already did, and it is much weaker than a vision
+model trained end to end. In exchange, building a projector for a new LLM takes
+seconds, where training one would take hours or days on a GPU.
 
 ## Limitations
 
 1. **Per-LLM.** `W` is tied to a specific LLM's embedding table. Swapping LLMs
-   means rebuilding the mmproj. The good news is that the rebuild is fast and
-   the CLI handles it with one command.
+   means rebuilding the mmproj, which is fast and takes one CLI command.
 2. **Concept list matters.** `globalmm` can only describe things that appear
-   in the concept list. If you care about medical scans, put medical terms in
-   `concepts.txt`. If you care about car parts, put car parts. The default
-   example file covers everyday objects only.
+   in the concept list, so for medical scans you would put medical terms in
+   `concepts.txt`, and for car parts a list of car parts. The default example
+   file covers everyday objects only.
 3. **Tokenizer BPE artifacts.** Words that split into multiple subword tokens
    such as `giraffe` (into `gir` and `affe`) are harder to recover. They end
    up as averaged fragments and the LLM may or may not put them back together.
@@ -175,22 +174,25 @@ for a new LLM takes seconds instead of days on a GPU.
    LLM's hidden size has to match the `projection_dim` in the mmproj, which is
    why the projector is per-LLM.
 5. **SigLIP is frozen.** If SigLIP fails to see something in the image, no
-   projector can recover it. This is not a replacement for proper multimodal
-   training if you need state-of-the-art quality.
+   projector can recover it. State-of-the-art quality still needs proper
+   multimodal training.
 
 ## Research: trained connectors for grounding and audio
 
-[`research/`](research/README.md) holds experiments that go beyond the closed-form matrix. They are
-separate from the `globalmm` package above, which is unchanged. The idea is the same (a frozen
-encoder, then something in the middle, then a frozen LLM), but the middle piece is *trained* instead of
-fit in one step. That costs GPU hours, and in return the LLM learns *where* things are, not just
-*what* they are:
+[`research/`](research/README.md) holds experiments that are separate from the `globalmm` package
+above. The package itself is unchanged. The experiments keep the same layout (a frozen encoder, a
+middle piece, a frozen LLM) and train the middle piece instead of fitting it in one step. Training
+takes a few GPU hours, and the LLM then learns where objects are in the image as well as what they
+are. There are two trained designs. The **connector** reads the vision tower's output directly. The
+**connector + donor** design first passes the image tokens through the first 4 language-model layers
+of a real vision-language model (the donor), whose attention lets every image token use context from
+the rest of the image.
 
-| | `globalmm` package (above) | Research: trained connector | Research: layer transplant |
+| | `globalmm` package (above) | Research: connector | Research: connector + donor |
 |---|---|---|---|
 | Frozen encoder | SigLIP SO400M | Qwen3.8 vision tower (or Whisper for audio) | Qwen3-VL-2B vision tower + its first 4 LLM layers |
 | Middle piece | one matrix `W` (1152 × d) | small trained network (30.7M params) | small trained network (16.8M params) |
-| How it is made | least squares on CPU, seconds | trained through the frozen LLM, 3–3.5 GPU-hours | same, 3.5 GPU-hours |
+| How it is made | least squares on CPU, seconds | trained through the frozen LLM, 3 to 3.5 GPU-hours | same, 3.5 GPU-hours |
 | Learns from | concept words blended per image | target answers: boxes, captions, transcripts | same |
 | Tokens sent to the LLM | 81 soft tokens pointing at *what* is in the image | one per 32×32-pixel patch, keeping layout | same |
 | Bounding boxes (held-out COCO, Acc@0.5) | no | 74% | 86% |
@@ -202,16 +204,16 @@ Results so far, all with an unmodified Llama-3.2-1B:
 - **Image grounding.** Qwen3.8's vision tower plus a 30.7M-parameter connector gives the text-only
   Llama-3.2-1B bounding boxes. "Where is the X?" Acc@0.5 is 74% on held-out COCO, against 5% for a
   no-image prior.
-- **Layer transplant.** Copying Qwen3-VL-2B's vision tower *and its first 4 LLM layers* (frozen) and
-  training only a 16.8M-parameter connector after them raises that to 86% on identical training
-  (Qwen3-VL-2B itself: 91%). This one runs in PyTorch only for now.
+- **Connector + donor.** With Qwen3-VL-2B's vision tower and first 4 LLM layers (frozen) in front of
+  a 16.8M-parameter connector, the same test reaches 86% with identical training (Qwen3-VL-2B itself
+  scores 91%). This design runs in PyTorch for now.
 - **Audio.** The Whisper-large-v3-turbo encoder plus a 46M-parameter connector gives the same Llama
   speech transcription at 5.3% WER and sound-event timestamps.
 - **Analysis.** Why closed-form mappings fail on image tokens, where trained tokens end up in
-  Llama's latent space, a training-free test of transplanting a VLM's layers, and a hybrid of the two.
+  Llama's latent space, a training-free test of copying a VLM's layers, and a hybrid of the two.
 
-Each connector took about 3 to 3.5 GPU-hours on one 8 GB laptop GPU. These experiments are not part of the
-`globalmm` package yet.
+Each connector took about 3 to 3.5 GPU-hours on one 8 GB laptop GPU. These experiments are not part
+of the `globalmm` package yet.
 
 ## API
 
