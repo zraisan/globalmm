@@ -1,7 +1,7 @@
 [project]
 name = "globalmm"
-version = "0.1.1"
-description = "Build llama.cpp mmproj.gguf files for any LLM via lstsq, no training."
+version = "0.2.0"
+description = "Build llama.cpp mmproj.gguf files for any LLM: closed-form in seconds, or a trained connector with bounding boxes."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
@@ -25,6 +25,7 @@ dependencies = [
     "gguf>=0.10",
     "pillow>=10.0",
     "numpy>=1.26",
+    "ijson>=3.2",
 ]
 
 [project.scripts]
@@ -41,3 +42,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["globalmm"]
+
+[tool.hatch.build.targets.sdist]
+include = ["/globalmm", "/README.md", "/LICENSE", "/pyproject.toml"]

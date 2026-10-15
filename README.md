@@ -10,9 +10,14 @@
 <br>
 
 `globalmm` builds an `mmproj.gguf` file that plugs into `llama.cpp` and lets any
-local LLM accept images. The projector inside the mmproj is a single 1152xD
-matrix, fit in seconds with closed-form least squares. Building it needs no
-gradient descent, no GPU time and no paired image-caption dataset.
+local LLM accept images. By default the projector inside the mmproj is a single
+1152xD matrix, fit in seconds with closed-form least squares. Building it needs
+no gradient descent, no GPU time and no paired image-caption dataset.
+
+A second method, `--method connector`, takes an existing mmproj (for example the
+one shipped with a vision-language model) and trains a new projector for your
+LLM. It needs a GPU and a few hours, and the LLM then answers with bounding
+boxes (see [Training a connector](#training-a-connector-for-bounding-boxes)).
 
 ## What you get
 
@@ -87,6 +92,66 @@ llama-server -m qwen2.5-1.5b.gguf --mmproj qwen.gguf --port 8080
 ```
 
 Inference runs entirely in llama.cpp and needs neither Python, transformers nor a GPU.
+
+## Training a connector for bounding boxes
+
+`--method connector` keeps the vision tower of an existing mmproj, replaces its
+projector with one trained for your LLM, and writes a new mmproj. The tower and
+the LLM stay frozen. The new projector has the same shape and type as the old
+one, so llama.cpp loads the result without changes.
+
+```bash
+globalmm build --method connector \
+    --mmproj mmproj-Qwen3.8-Flash-Next-Q8_0.gguf \
+    --llm meta-llama/Llama-3.2-1B-Instruct \
+    --out llama-grounding.gguf
+```
+
+Training uses COCO train2017. On first run `globalmm` downloads the annotations
+(about 250 MB) and the 118k images, shrunk to 448 pixels on arrival (about
+4 GB), into `./.globalmm/coco/`. If you already have the train2017 images, pass
+`--coco-images DIR` to skip the download. Each example asks the LLM to list the
+objects with boxes, to find one object, or to describe the image in one
+sentence, and only the projector is updated.
+
+Requirements and cost:
+
+- an NVIDIA GPU with about 8 GB of memory for a 1B LLM (larger LLMs need more);
+- about 3 hours for one pass over COCO with a 1B LLM on a laptop RTX 3070;
+- the GGUF of the same LLM, for running the result in llama.cpp.
+
+Training saves a checkpoint every 200 steps in `.globalmm/runs/<out name>/`.
+Running the same command again resumes from it. `--train-images N` and
+`--steps N` give a shorter run.
+
+Then ask for boxes:
+
+```bash
+llama-server -m Llama-3.2-1B-Instruct-Q8_0.gguf --mmproj llama-grounding.gguf \
+    -c 4096 --image-max-tokens 256
+```
+
+```
+Where is the dog? Answer with bounding boxes.
+-> [312,402,655,890]
+List the objects in this image with their bounding boxes.
+-> person [437,83,785,900]
+   skis [294,822,915,941]
+```
+
+Boxes are `[x1,y1,x2,y2]` on a 0-999 scale relative to the image. Results are
+best with images resized so the longest side is 448 pixels, as in training.
+
+Supported mmproj types (`clip.projector_type`):
+
+| Type | Models | Status |
+|---|---|---|
+| `qwen3vl_merger` | Qwen3-VL and Qwen3.5-style vision towers | tested with the Qwen3.8 mmproj; DeepStack layers are dropped because a text-only LLM cannot use them |
+
+Other projector types (Gemma 3, LLaVA-style and more) are planned. The
+[research notes](research/README.md) describe how this method was developed and
+evaluated, including a variant that adds layers from a donor vision-language
+model.
 
 ## How it works
 
