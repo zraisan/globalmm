@@ -2,6 +2,7 @@
   <h1>Borrowed Senses</h1>
   <p><strong>Giving a text-only LLM bounding boxes for images and timestamps for sounds<br>by training a small connector</strong></p>
   <p><em>globalmm research notes, October 2026</em></p>
+  <p><a href="https://claude.ai/artifact/1GaWzPWWAUNgq8XmMzGi4S">Blog version</a> with interactive examples, audio clips and charts</p>
 </div>
 
 <br>

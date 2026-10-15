@@ -188,6 +188,9 @@ are. There are two trained designs. The **connector** reads the vision tower's o
 of a real vision-language model (the donor), whose attention lets every image token use context from
 the rest of the image.
 
+The same results are also written up as a [blog post](https://claude.ai/artifact/1GaWzPWWAUNgq8XmMzGi4S) with interactive examples, audio clips
+and charts.
+
 | | `globalmm` package (above) | Research: connector | Research: connector + donor |
 |---|---|---|---|
 | Frozen encoder | SigLIP SO400M | Qwen3.8 vision tower (or Whisper for audio) | Qwen3-VL-2B vision tower + its first 4 LLM layers |
