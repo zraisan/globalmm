@@ -43,7 +43,8 @@ costs, and what the LLM can then do.
 - **Audio connector.** The same recipe with Whisper's encoder gives the LLM
   speech transcription and sound-event timestamps.
 
-The full write-up with methods and every number is in
+The results, with interactive examples, audio clips and charts, are in the
+[blog post](https://zainraisan.com/blog/borrowed-senses/). The full write-up with methods and every number is in
 [`research/README.md`](research/README.md).
 
 ## Quick start
@@ -286,7 +287,8 @@ method and the two designs that are not in the package yet, connector + donor
 and the audio connector. It also covers why closed-form mappings fail on image
 tokens, where trained tokens end up in Llama's latent space, a training-free
 test of copying a vision-language model's layers, and the training budget of
-every run (all on one 8 GB laptop GPU).
+every run (all on one 8 GB laptop GPU). The [blog post](https://zainraisan.com/blog/borrowed-senses/) presents the
+same results with interactive examples.
 
 ## API
 
